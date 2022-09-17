@@ -1,4 +1,9 @@
-# Stable Diffusion
+# Jimmy's Stable Diffusion
+
+## Why this repository exists
+
+I could not find a decent fork of stable-diffusion that was the simple barebones models without a lot of unnecessary things like Gradio, webUIs, scripts, K-diffusion, etc. All these things are great, but there is no reason they need to be in a central hub of the root diffusion model's code. I wanted a version of stable-diffusion with the latest performance updates but _with nothing else_, so now this repo exists to pursue code purity.
+
 *Stable Diffusion was made possible thanks to a collaboration with [Stability AI](https://stability.ai/) and [Runway](https://runwayml.com/) and builds upon our previous work:*
 
 [**High-Resolution Image Synthesis with Latent Diffusion Models**](https://ommer-lab.com/research/latent-diffusion-models/)<br/>
