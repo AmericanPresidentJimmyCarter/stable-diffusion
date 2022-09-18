@@ -610,6 +610,7 @@ class DDPM(pl.LightningModule):
 
 class LatentDiffusion(DDPM):
     """main class"""
+    personalization_config = None
 
     def __init__(
         self,
@@ -674,8 +675,12 @@ class LatentDiffusion(DDPM):
         for param in self.model.parameters():
             param.requires_grad = False
 
-        self.embedding_manager = self.instantiate_embedding_manager(
-            personalization_config, self.cond_stage_model
+        self.personalization_config = personalization_config
+
+    def create_embedding_manager(self):
+        embedding_manager = self.instantiate_embedding_manager(
+            self.personalization_config,
+            self.cond_stage_model,
         )
 
         self.emb_ckpt_counter = 0
@@ -683,8 +688,10 @@ class LatentDiffusion(DDPM):
         # if self.embedding_manager.is_clip:
         #     self.cond_stage_model.update_embedding_func(self.embedding_manager)
 
-        for param in self.embedding_manager.embedding_parameters():
+        for param in embedding_manager.embedding_parameters():
             param.requires_grad = True
+        embedding_manager.eval()
+        return embedding_manager
 
     def make_cond_schedule(
         self,
@@ -820,13 +827,13 @@ class LatentDiffusion(DDPM):
             )
         return self.scale_factor * z
 
-    def get_learned_conditioning(self, c):
+    def get_learned_conditioning(self, c, embedding_manager=None):
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(
                 self.cond_stage_model.encode
             ):
                 c = self.cond_stage_model.encode(
-                    c, embedding_manager=self.embedding_manager
+                    c, embedding_manager=embedding_manager
                 )
                 if isinstance(c, DiagonalGaussianDistribution):
                     c = c.mode()

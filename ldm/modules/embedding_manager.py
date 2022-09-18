@@ -58,6 +58,7 @@ class EmbeddingManager(nn.Module):
         super().__init__()
 
         self.embedder = embedder
+        device = embedder.device
 
         self.string_to_token_dict = {}
         self.string_to_param_dict = nn.ParameterDict()
@@ -105,7 +106,7 @@ class EmbeddingManager(nn.Module):
 
                 with torch.no_grad():
                     init_word_embedding = get_embedding_for_tkn(
-                        init_word_token.cpu()
+                        init_word_token.to(device)
                     )
 
                 token_params = torch.nn.Parameter(
@@ -239,8 +240,6 @@ class EmbeddingManager(nn.Module):
         if not full:
             for key, value in self.string_to_param_dict.items():
                 self.string_to_param_dict[key] = torch.nn.Parameter(value.half())
-
-        print(f'Added terms: {", ".join(self.string_to_param_dict.keys())}')
 
     def get_embedding_norms_squared(self):
         all_params = torch.cat(

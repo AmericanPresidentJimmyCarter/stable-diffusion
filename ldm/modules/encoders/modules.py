@@ -259,7 +259,6 @@ class FrozenCLIPEmbedder(AbstractEncoder):
             inputs_embeds=None,
             embedding_manager=None,
         ) -> torch.Tensor:
-
             seq_length = (
                 input_ids.shape[-1]
                 if input_ids is not None
