@@ -315,7 +315,7 @@ class StableDiffusionInference:
           new sd-diffusers concepts into the EmbeddingManager. Ignored if
           conditioning is provided because it assumes that when computing the
           conditioning you already altered the embedding manager.
-        @return_pil_images whether or not to return PIL images.
+        @return_pil_images: Whether or not to return PIL images.
         @scale: Conditioning scale, multiplier for the conditioning.
         @strength: Strength for when doing "img2img". Adjusts steps by this
           amount such that a strength of 0.5 will halve the number of steps.
