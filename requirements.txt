@@ -4,4 +4,5 @@ pytorch_lightning
 einops
 numpy
 omegaconf
+transformers
 https://github.com/crowsonkb/k-diffusion/archive/master.zip
