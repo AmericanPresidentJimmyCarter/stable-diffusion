@@ -10,7 +10,7 @@ import k_diffusion as K
 import numpy as np
 import torch.nn as nn
 
-from PIL import Image
+from PIL import Image, ImageOps
 from einops import rearrange, repeat
 from pytorch_lightning import seed_everything
 from transformers import logging
@@ -22,6 +22,7 @@ from .util import (
     cat_self_with_repeat_interleaved,
     load_img,
     load_model_from_config,
+    preprocess_mask,
     prompt_inject_custom_concepts,
     repeat_interleave_along_dim_0,
     split_weighted_subprompts_and_return_cond_latents,
@@ -41,6 +42,59 @@ VALID_SAMPLERS = {'k_lms', 'dpm2', 'dpm2_ancestral', 'heun', 'euler',
 MAX_STEPS = 250
 MIN_HEIGHT = 384
 MIN_WIDTH = 384
+
+
+def k_forward_multiconditionable(
+    inner_model: Callable,
+    x: torch.Tensor,
+    sigma: torch.Tensor,
+    uncond: torch.Tensor,
+    cond: torch.Tensor,
+    cond_scale: float,
+    cond_arities: Optional[Iterable[int]],
+    cond_weights: Optional[Iterable[float]],
+    use_half: bool=False,
+) -> torch.Tensor:
+    '''
+    Magicool k-sampler prompt positive/negative weighting from birch-san.
+
+    https://github.com/Birch-san/stable-diffusion/blob/birch-mps-waifu/scripts/txt2img_fork.py
+    '''
+    uncond_count = uncond.size(dim=0)
+    cond_count = cond.size(dim=0)
+    cond_in = torch.cat((uncond, cond)).to(x.device)
+    del uncond, cond
+    cond_arities_tensor = torch.tensor(cond_arities, device=cond_in.device)
+    if use_half and (x.dtype == torch.float32 or x.dtype == torch.float64):
+        x = x.half()
+    x_in = cat_self_with_repeat_interleaved(t=x,
+        factors_tensor=cond_arities_tensor, factors=cond_arities,
+        output_size=cond_count)
+    del x
+    sigma_in = cat_self_with_repeat_interleaved(t=sigma,
+        factors_tensor=cond_arities_tensor, factors=cond_arities,
+        output_size=cond_count)
+    del sigma
+    uncond_out, conds_out = inner_model(x_in, sigma_in, cond=cond_in) \
+        .split([uncond_count, cond_count])
+    del x_in, sigma_in, cond_in
+    unconds = repeat_interleave_along_dim_0(t=uncond_out,
+        factors_tensor=cond_arities_tensor, factors=cond_arities,
+        output_size=cond_count)
+    del cond_arities_tensor
+    # transform
+    #   tensor([0.5, 0.1])
+    # into:
+    #   tensor([[[[0.5000]]],
+    #           [[[0.1000]]]])
+    weight_tensor = torch.tensor(list(cond_weights),
+        device=uncond_out.device, dtype=uncond_out.dtype) * cond_scale
+    weight_tensor = weight_tensor.reshape(len(list(cond_weights)), 1, 1, 1)
+    deltas: torch.Tensor = (conds_out-unconds) * weight_tensor
+    del conds_out, unconds, weight_tensor
+    cond = sum_along_slices_of_dim_0(deltas, arities=cond_arities)
+    del deltas
+    return uncond_out + cond
 
 
 class StableDiffusionConfig:
@@ -64,6 +118,9 @@ class StableDiffusionConfig:
 
 
 class KCFGDenoiser(nn.Module):
+    '''
+    k-diffusion sampling with multi-conditionable denoising.
+    '''
     def __init__(self, model):
         super().__init__()
         self.inner_model = model
@@ -75,50 +132,62 @@ class KCFGDenoiser(nn.Module):
         uncond: torch.Tensor,
         cond: torch.Tensor,
         cond_scale: float,
-        cond_arities: Iterable[int],
-        cond_weights: Optional[Iterable[float]],
+        cond_arities: Optional[Iterable[int]]=None,
+        cond_weights: Optional[Iterable[float]]=None,
         use_half: bool=False,
     ) -> torch.Tensor:
-        '''
-        Magicool k-sampler prompt positive/negative weighting from birch-san.
+        return k_forward_multiconditionable(
+            self.inner_model,
+            x,
+            sigma,
+            uncond,
+            cond,
+            cond_scale,
+            cond_arities=cond_arities,
+            cond_weights=cond_weights,
+            use_half=use_half,
+        )
 
-        https://github.com/Birch-san/stable-diffusion/blob/birch-mps-waifu/scripts/txt2img_fork.py
-        '''
-        uncond_count = uncond.size(dim=0)
-        cond_count = cond.size(dim=0)
-        cond_in = torch.cat((uncond, cond)).to(x.device)
-        del uncond, cond
-        cond_arities_tensor = torch.tensor(cond_arities, device=cond_in.device)
-        if use_half and (x.dtype == torch.float32 or x.dtype == torch.float64):
-            x = x.half()
-        x_in = cat_self_with_repeat_interleaved(t=x,
-            factors_tensor=cond_arities_tensor, factors=cond_arities,
-            output_size=cond_count)
-        del x
-        sigma_in = cat_self_with_repeat_interleaved(t=sigma,
-            factors_tensor=cond_arities_tensor, factors=cond_arities,
-            output_size=cond_count)
-        del sigma
-        uncond_out, conds_out = self.inner_model(x_in, sigma_in, cond=cond_in) \
-            .split([uncond_count, cond_count])
-        del x_in, sigma_in, cond_in
-        unconds = repeat_interleave_along_dim_0(t=uncond_out,
-            factors_tensor=cond_arities_tensor, factors=cond_arities,
-            output_size=cond_count)
-        del cond_arities_tensor
-        # transform
-        #   tensor([0.5, 0.1])
-        # into:
-        #   tensor([[[[0.5000]]],
-        #           [[[0.1000]]]])
-        weight_tensor = torch.tensor(list(cond_weights),
-            device=uncond_out.device, dtype=uncond_out.dtype) * cond_scale
-        weight_tensor = weight_tensor.reshape(len(list(cond_weights)), 1, 1, 1)
-        deltas: torch.Tensor = (conds_out-unconds) * weight_tensor
-        del conds_out, unconds, weight_tensor
-        cond = sum_along_slices_of_dim_0(deltas, arities=cond_arities)
-        del deltas
-        return uncond_out + cond
+
+class KCFGDenoiserMasked(nn.Module):
+    '''
+    k-diffusion sampling with multi-conditionable denoising and masking.
+    '''
+    def __init__(self, model):
+        super().__init__()
+        self.inner_model = model
+
+    def forward(self,
+        x: torch.Tensor,
+        sigma: torch.Tensor,
+        uncond: torch.Tensor,
+        cond: torch.Tensor,
+        cond_scale: float,
+        cond_arities: Optional[Iterable[int]]=None,
+        cond_weights: Optional[Iterable[float]]=None,
+        use_half: bool=False,
+        mask: Optional[torch.Tensor]=None,
+        x_frozen: Optional[torch.Tensor]=None,
+    ) -> torch.Tensor:
+        denoised = k_forward_multiconditionable(
+            self.inner_model,
+            x,
+            sigma,
+            uncond,
+            cond,
+            cond_scale,
+            cond_arities=cond_arities,
+            cond_weights=cond_weights,
+            use_half=use_half,
+        )
+
+        if mask is not None:
+            assert x_frozen is not None
+            img_orig = x_frozen
+            mask_inv = 1. - mask
+            denoised = (img_orig * mask) + (denoised * mask_inv)
+
+        return denoised
 
 
 class StableDiffusionInference:
@@ -135,6 +204,8 @@ class StableDiffusionInference:
     model: Stable diffusion model instance.
     model_k_wrapped: k-diffusion wrapped model instance.
     model_k_config: Default configuration for the k-diffusion wrapper.
+    model_k_config_masked: k-diffusion configuration for masked sampling
+      (inpainting/outpainting).
     use_half: Whether or not to use fp16 instead of fp32.
     '''
     opt: StableDiffusionConfig = StableDiffusionConfig()
@@ -147,6 +218,7 @@ class StableDiffusionInference:
     model = None
     model_k_wrapped = None
     model_k_config = None
+    model_k_config_masked = None
     use_half = False
 
     def __init__(self,
@@ -193,6 +265,7 @@ class StableDiffusionInference:
 
         self.model_k_wrapped = K.external.CompVisDenoiser(self.model)
         self.model_k_config = KCFGDenoiser(self.model_k_wrapped)
+        self.model_k_config_masked = KCFGDenoiserMasked(self.model_k_wrapped)
 
     def _height_and_width_check(self, height, width):
         if height * width > self.max_resolution:
@@ -301,6 +374,9 @@ class StableDiffusionInference:
         @init_pil_image: A PIL image to use to initialize an image2image
           conversion. If this is set, the number of steps is scaled by the
           strength such that actual_steps = math.floor(steps * strength).
+          The image can be RGB or RGBA. If the image has an alpha layer, that
+          alpha layer is used to mask the image and perform inpainting/
+          outpainting.
         @init_pil_image_as_random_latent: Use a random image instead of an
           actual image for image2image.
         @k_sampler_callback: Function for the callback on the k-diffusion
@@ -371,14 +447,34 @@ class StableDiffusionInference:
                 max_n_subprompts=self.max_n_subprompts,
             )
 
+        mask_image = None
+        mask_latent = None
+        mask_tensor_from_image = None
         t_enc = None
         if init_latent is None and init_pil_image is not None:
+            # We have an alpha channel so we are inpainting, initialize all the
+            # components of masking.
+            if init_pil_image.mode == 'RGBA':
+                mask_image = init_pil_image.split()[-1]
+                mask_image = ImageOps.invert(mask_image)
+
+                temp_tensor, _ = load_img(img=mask_image)
+                mask_tensor_from_image = repeat(
+                    temp_tensor.to(self.device),
+                    '1 ... -> b ...',
+                    b=batch_size,
+                )
+                mask = preprocess_mask(mask_image).to(self.device)
+                mask_latent = torch.cat([mask] * batch_size)
+
+            # Load image converts to RGB mode by default, stripping any alpha
+            # channels that might exist.
             init_image, (_width, _height) = load_img(img=init_pil_image)
             init_image = init_image.to(self.device)
             init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
             if init_pil_image_as_random_latent is False:
                 init_latent = self.model.get_first_stage_encoding(
-                    self.model.encode_first_stage(init_image))  # move to latent space
+                    self.model.encode_first_stage(init_image))
             else:
                 init_latent = torch.zeros(
                     batch_size,
@@ -419,21 +515,31 @@ class StableDiffusionInference:
         else:
             x_noised = torch.randn([batch_size, *shape], device=self.device) * \
                 sigmas[0] # for GPU draw
+
+        was_masked = all(val is not None for val in
+            [mask_image, mask_latent, mask_tensor_from_image])
         extra_args = {
             'cond': conditioning,
             'uncond': unconditioning,
             'cond_scale': scale,
-            'cond_weights': [pr[1] for pr in weighted_subprompts] * batch_size,
             'cond_arities': [len(weighted_subprompts),] * batch_size,
+            'cond_weights': [pr[1] for pr in weighted_subprompts] * batch_size,
             'use_half': self.use_half,
         }
+        if was_masked:
+            extra_args['mask'] = mask_latent
+            extra_args['x_frozen'] = init_latent
         if k_sampler_extra_args is not None:
             extra_args = {
                 **extra_args,
                 **k_sampler_extra_args,
             }
-        _k_sampler_config = self.model_k_config if k_sampler_config is None \
-            else k_sampler_config
+
+        _k_sampler_config = k_sampler_config
+        if _k_sampler_config is None:
+            _k_sampler_config = self.model_k_config
+        if mask_image  is not None:
+            _k_sampler_config = self.model_k_config_masked
         samples = sampling_fn(
             _k_sampler_config,
             x_noised,
@@ -446,7 +552,7 @@ class StableDiffusionInference:
             x_samples = self.model.decode_first_stage(samples)
 
         images: List = []
-        if return_pil_images is True:
+        if return_pil_images is True and not was_masked:
             x_samples_clamped = torch.clamp(
                 (x_samples + 1.0) / 2.0,
                 min=0.0,
@@ -459,6 +565,23 @@ class StableDiffusionInference:
                 buffered = BytesIO()
                 img.save(buffered, format='PNG')
 
+                images.append(img)
+        if return_pil_images is True and was_masked:
+            image = torch.clamp(
+                (init_image + 1.0) / 2.0,
+                min=0.0, max=1.0)
+            mask = torch.clamp((mask_tensor_from_image + 1.0) / 2.0,
+                min=0.0, max=1.0)
+
+            x_samples_clamped = torch.clamp(
+                (x_samples + 1.0) / 2.0,
+                min=0.0,
+                max=1.0)
+
+            for x_sample_c in x_samples_clamped:
+                inpainted = (1 - mask) * image + mask * x_sample_c
+                inpainted = inpainted.cpu().numpy().transpose(0,2,3,1)[0] * 255
+                img = Image.fromarray(inpainted.astype(np.uint8))
                 images.append(img)
 
         torch.cuda.empty_cache()

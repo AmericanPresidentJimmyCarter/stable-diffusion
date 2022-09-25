@@ -12,6 +12,7 @@ import PIL
 
 import numpy as np
 import torch
+import torchvision.transforms as T
 
 from PIL import Image
 from itertools import islice
@@ -25,6 +26,34 @@ sd_concepts_url_fn = lambda concept: f'https://huggingface.co/sd-concepts-librar
 UNLIKELY_TOKENS = [
     '¯', '°', '±', '²', '³', '´', 'µ', '·', '¸', '¹', 'º', '»', '¼', '½', '¾',
 ]
+
+
+def autocrop_transparent_image(image, border=0):
+    '''
+    Crop an RGBA image to remove any transparency around the outside.
+    '''
+    # Get the bounding box
+    bbox = image.getbbox()
+
+    # Crop the image to the contents of the bounding box
+    image = image.crop(bbox)
+
+    # Determine the width and height of the cropped image
+    (width, height) = image.size
+
+    # Add border
+    width += border * 2
+    height += border * 2
+
+    # Create a new image object for the output image
+    cropped_image = Image.new('RGBA', (width, height), (0,0,0,0))
+
+    # Paste the cropped image onto the new image
+    cropped_image.paste(image, (border, border))
+
+    # Done!
+    return cropped_image
+
 
 def cat_self_with_repeat_interleaved(
     t: torch.Tensor,
@@ -65,7 +94,10 @@ def cat_self_with_repeat_interleaved(
     if len(factors) == 1:
         return repeat_along_dim_0(t, factors[0]+1)
     return torch.cat((t, repeat_interleave_along_dim_0(t=t,
-        factors_tensor=factors_tensor, factors=factors, output_size=output_size))).to(t.device)
+        factors_tensor=factors_tensor,
+        factors=factors,
+        output_size=output_size,
+    ))).to(t.device)
 
 
 def chunk(it, size):
@@ -86,6 +118,27 @@ def combine_weighted_subprompts(alpha, wsp_a, wsp_b):
 def document_to_pil(doc):
     uri_data = urllib.request.urlopen(doc.uri)
     return Image.open(BytesIO(uri_data.read()))
+
+
+def generate_noise_pil_image(width: int, height: int) -> Image:
+    tensor = torch.rand(3, height, width)
+    return T.ToPILImage()(tensor)
+
+
+def preprocess_mask(mask: Image) -> torch.Tensor:
+    '''
+    Convert a masked image to a torch tensor.
+    '''
+    mask = mask.convert('L')
+    w, h = mask.size
+    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+    mask = mask.resize((w // 8, h // 8), resample=PIL.Image.NEAREST)
+    mask = np.array(mask).astype(np.float32) / 255.0
+    mask = np.tile(mask, (4, 1, 1))
+    mask = mask[None].transpose(0, 1, 2, 3)  # what does this step do?
+    mask = 1 - mask  # repaint white, keep black
+    mask = torch.from_numpy(mask)
+    return mask
 
 
 def prompt_inject_custom_concepts(
@@ -211,6 +264,7 @@ def prompt_inject_custom_concepts(
         shutil.rmtree(os.path.join(input_path, 'embeddings_tmp'), ignore_errors=True)
     return prompt_injected, embedding_manager
 
+
 def repeat_along_dim_0(t: torch.Tensor, factor: int) -> torch.Tensor:
     """
     Repeats a tensor's contents along its 0th dim `factor` times.
@@ -245,7 +299,7 @@ def load_img(path: str=None, img: Image=None, convert_to_rgb=True):
         image = img
 
     if convert_to_rgb:
-        image = image.convert("RGB")
+        image = image.convert('RGB')
 
     w, h = image.size
     w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
@@ -257,8 +311,8 @@ def load_img(path: str=None, img: Image=None, convert_to_rgb=True):
 
 
 def load_model_from_config(config, ckpt, use_half=False):
-    pl_sd = torch.load(ckpt, map_location="cpu")
-    sd = pl_sd["state_dict"]
+    pl_sd = torch.load(ckpt, map_location='cpu')
+    sd = pl_sd['state_dict']
     model = instantiate_from_config(config.model)
     m, u = model.load_state_dict(sd, strict=False)
 
@@ -407,9 +461,10 @@ def sum_along_slices_of_dim_0(t: torch.Tensor, arities: Iterable[int]) -> torch.
         if t.size(dim=0) == 1:
             return t
         return t.sum(dim=0, keepdim=True)
-    splits: List[Tensor] = t.split(arities)
+    splits: List[torch.Tensor] = t.split(arities)
     device = t.device
     del t
-    sums: List[Tensor] = [torch.sum(split, dim=0, keepdim=True) for split in splits]
+    sums: List[torch.Tensor] = [torch.sum(split, dim=0, keepdim=True)
+        for split in splits]
     del splits
     return torch.cat(sums).to(device)
