@@ -2,6 +2,7 @@ import math
 import sys
 import torch
 
+from PIL import Image, ImageOps
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -10,12 +11,12 @@ import k_diffusion as K
 import numpy as np
 import torch.nn as nn
 
-from PIL import Image, ImageOps
+from contextlib import nullcontext
 from einops import rearrange, repeat
-from pytorch_lightning import seed_everything
-from transformers import logging
-
 from omegaconf import OmegaConf
+from pytorch_lightning import seed_everything
+from torch import autocast
+from transformers import logging
 
 from .exceptions import StableDiffusionInferenceValueError
 from .util import (
@@ -219,7 +220,7 @@ class StableDiffusionInference:
     model_k_wrapped = None
     model_k_config = None
     model_k_config_masked = None
-    use_half = False
+    use_half = True
 
     def __init__(self,
         checkpoint_loc: Optional[str]=None,
@@ -228,12 +229,24 @@ class StableDiffusionInference:
         max_n_subprompts=8,
         max_resolution=589824,
         n_iter: int=1,
-        n_samples: int=4,
         stable_path: str=str(Path(__file__).resolve().parent.parent),
-        use_half: bool=False,
+        use_half: bool=True,
         width: int=512,
         **kwargs,
     ):
+        '''
+        @checkpoint_loc: Location of the weights.
+        @config_loc: Location of the OmegaConf configuration file.
+        @height: Default height of image in pixels.
+        @max_n_subprompts: Maximum number of subprompts you can add to an image
+          in the denoising step. More subprompts = slower denoising.
+        @max_resolution: The maximum resolution for images in pixels, to keep
+          your GPU from OOMing in server applications.
+        @n_iter: Default number of iterations for sampler.
+        @stable_path: Path for this library.
+        @use_half: Sample with FP16 instead of FP32.
+        @width: Default width of image in pixels.
+        '''
         super().__init__(**kwargs)
         self.input_path = stable_path
         if config_loc is not None:
@@ -247,7 +260,6 @@ class StableDiffusionInference:
 
         self.opt.height = height
         self.opt.width = width
-        self.opt.n_samples = n_samples
         self.opt.n_iter = n_iter
 
         self.max_n_subprompts = max_n_subprompts
@@ -285,6 +297,23 @@ class StableDiffusionInference:
             raise StableDiffusionInferenceValueError(
                 f'width must be >= {MIN_WIDTH} (got {width})')
 
+    def precision_cast_and_freeze_model(func: Callable):
+        '''
+        Decorator for proper usage of the model. Casts floats correctly and
+        freezes it for greater precision.
+        '''
+        def wrapper(self, *args, **kwargs):
+            nonlocal func
+            precision_scope = autocast \
+                if self.opt.precision == "autocast" \
+                else nullcontext
+            with torch.no_grad():
+                with precision_scope("cuda"):
+                    with self.model.ema_scope():
+                        return func(self, *args, **kwargs)
+        return wrapper
+
+    @precision_cast_and_freeze_model
     def compute_conditioning_and_weights(
         self,
         prompt: str,
@@ -324,7 +353,9 @@ class StableDiffusionInference:
             embedding_manager,
         )
 
-    def sample(self,
+    @precision_cast_and_freeze_model
+    def sample(
+        self,
         prompt: str,
         batch_size: int,
         sampler: str,
