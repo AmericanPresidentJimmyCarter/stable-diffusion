@@ -24,7 +24,7 @@ Make pictures:
 from operator import itemgetter
 from stable_inference import StableDiffusionInference
 
-engine = simple_inference.StableDiffusionInference()
+engine = StableDiffusionInference()
 
 batch_size = 4 # How many images to make at once
 _, extra_data = engine.sample(
@@ -46,7 +46,7 @@ from PIL import Image
 from operator import itemgetter
 from stable_inference import StableDiffusionInference
 
-engine = simple_inference.StableDiffusionInference()
+engine = StableDiffusionInference()
 
 # If this image has an alpha layer, that's used as a mask for inpainting.
 image = Image.open('a_red_ball.png')
