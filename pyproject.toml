@@ -11,6 +11,7 @@ authors = [
 description = "A clean, efficient stable diffusion inference engine"
 readme = "README.md"
 license = { file="LICENSE" }
+dynamic = ["dependencies"]
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -21,3 +22,6 @@ classifiers = [
 [project.urls]
 "Homepage" = "https://github.com/AmericanPresidentJimmyCarter/stable-diffusion"
 "Bug Tracker" = "https://github.com/AmericanPresidentJimmyCarter/stable-diffusion/issues"
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

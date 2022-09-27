@@ -5,4 +5,4 @@ einops
 numpy
 omegaconf
 transformers
-https://github.com/crowsonkb/k-diffusion/archive/master.zip
+k-diffusion @ git+https://github.com/crowsonkb/k-diffusion.git@master
