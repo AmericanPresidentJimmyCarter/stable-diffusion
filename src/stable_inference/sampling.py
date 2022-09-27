@@ -19,8 +19,6 @@ from pytorch_lightning import seed_everything
 from torch import autocast
 from transformers import logging
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from .exceptions import StableDiffusionInferenceValueError
 from .util import (
     cat_self_with_repeat_interleaved,
@@ -33,16 +31,6 @@ from .util import (
     sum_along_slices_of_dim_0
 )
 
-# Deal with "ldm" module collisions.
-try:
-    from ldm.modules.encoders.modules import FrozenCLIPEmbedder
-except ImportError:
-    spec = importlib.util.spec_from_file_location('ldm',
-        str(Path(__file__).resolve().parent.parent.parent / 'ldm' / '__init__.py'))
-    ldm = importlib.util.module_from_spec(spec)
-    sys.modules['ldm'] = ldm
-    spec.loader.exec_module(ldm)
-
 
 # Make transformers stop screaming.
 logging.set_verbosity_error()
@@ -52,6 +40,7 @@ VALID_SAMPLERS = {'k_lms', 'dpm2', 'dpm2_ancestral', 'heun', 'euler',
     'euler_ancestral'}
 
 
+INPUT_PATH = str(Path(__file__).parent.absolute())
 MAX_STEPS = 250
 MIN_HEIGHT = 384
 MIN_WIDTH = 384
@@ -208,7 +197,7 @@ class StableDiffusionInference:
     Inference calss for stable diffusion.
 
     config: OmegaConf containing the SD configuration, loaded from
-      configs/stable-diffusion/v1-inference.yaml.
+      v1-inference.yaml.
     device: Device we are running on, typically CUDA.
     input_path: Where to play temporary files or stores.
     max_n_subprompts: Maximum number of subprompts for the user to be able to
@@ -225,7 +214,7 @@ class StableDiffusionInference:
 
     config = None
     device = None
-    input_path = ''
+    input_path = INPUT_PATH
     max_n_subprompts = None
     max_resolution = None
     model = None
@@ -241,7 +230,7 @@ class StableDiffusionInference:
         max_n_subprompts=8,
         max_resolution=589824,
         n_iter: int=1,
-        stable_path: str=str(Path(__file__).resolve().parent.parent),
+        stable_path: str=INPUT_PATH,
         use_half: bool=True,
         width: int=512,
         **kwargs,
@@ -259,16 +248,17 @@ class StableDiffusionInference:
         @use_half: Sample with FP16 instead of FP32.
         @width: Default width of image in pixels.
         '''
-        super().__init__(**kwargs)
         self.input_path = stable_path
         if config_loc is not None:
             self.opt.config = config_loc
         else:
-            self.opt.config = f'{stable_path}/configs/stable-diffusion/v1-inference.yaml'
+            self.opt.config = f'{stable_path}/v1-inference.yaml'
         if checkpoint_loc is not None:
             self.opt.ckpt = checkpoint_loc
         else:
-            self.opt.ckpt = f'{stable_path}/models/ldm/stable-diffusion-v1/model.ckpt'
+            # Maybe they are here?
+            stable_repo_path = str(Path(__file__).resolve().parent.parent)
+            self.opt.ckpt = f'{stable_repo_path}/models/ldm/stable-diffusion-v1/model.ckpt'
 
         self.opt.height = height
         self.opt.width = width
