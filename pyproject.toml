@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stable_inference"
-version = "0.0.7"
+version = "0.0.8"
 authors = [
     { name="Jimmy", email="goto@github.com" },
 ]
