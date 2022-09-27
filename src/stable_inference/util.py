@@ -28,10 +28,10 @@ try:
     from ldm.modules.embedding_manager import EmbeddingManager
     from ldm.util import instantiate_from_config
 except ImportError:
-    spec = importlib.util.spec_from_file_location('module.name',
-        str(Path(__file__).resolve().parent.parent / 'ldm'))
+    spec = importlib.util.spec_from_file_location('ldm',
+        str(Path(__file__).resolve().parent.parent.parent / 'ldm' / '__init__.py'))
     ldm = importlib.util.module_from_spec(spec)
-    sys.modules['module.name'] = ldm
+    sys.modules['ldm'] = ldm
     spec.loader.exec_module(ldm)
 
     from ldm.modules.encoders.modules import FrozenCLIPEmbedder

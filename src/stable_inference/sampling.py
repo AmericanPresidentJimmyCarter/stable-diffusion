@@ -19,6 +19,8 @@ from pytorch_lightning import seed_everything
 from torch import autocast
 from transformers import logging
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from .exceptions import StableDiffusionInferenceValueError
 from .util import (
     cat_self_with_repeat_interleaved,
@@ -31,19 +33,15 @@ from .util import (
     sum_along_slices_of_dim_0
 )
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 # Deal with "ldm" module collisions.
 try:
     from ldm.modules.encoders.modules import FrozenCLIPEmbedder
 except ImportError:
-    spec = importlib.util.spec_from_file_location('module.name',
-        str(Path(__file__).resolve().parent.parent / 'ldm'))
+    spec = importlib.util.spec_from_file_location('ldm',
+        str(Path(__file__).resolve().parent.parent.parent / 'ldm' / '__init__.py'))
     ldm = importlib.util.module_from_spec(spec)
-    sys.modules['module.name'] = ldm
+    sys.modules['ldm'] = ldm
     spec.loader.exec_module(ldm)
-
-    from ldm.modules.encoders.modules import FrozenCLIPEmbedder
 
 
 # Make transformers stop screaming.
