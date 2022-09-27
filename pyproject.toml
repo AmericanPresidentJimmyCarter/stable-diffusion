@@ -3,10 +3,10 @@ requires = ["setuptools>=64.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "stable_diffusion_stable_inference"
-version = "0.0.4"
+name = "stable_inference"
+version = "0.0.5"
 authors = [
-  { name="Jimmy", email="goto@github.com" },
+    { name="Jimmy", email="goto@github.com" },
 ]
 description = "A clean, efficient stable diffusion inference engine"
 readme = "README.md"
