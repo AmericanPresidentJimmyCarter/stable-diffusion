@@ -1,6 +1,8 @@
+import importlib.util
 import os
 import re
 import shutil
+import sys
 import urllib.request
 
 from functools import partial
@@ -17,9 +19,25 @@ import torchvision.transforms as T
 from PIL import Image
 from itertools import islice
 
-from ldm.modules.encoders.modules import FrozenCLIPEmbedder
-from ldm.modules.embedding_manager import EmbeddingManager
-from ldm.util import instantiate_from_config
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Deal with "ldm" module collisions.
+try:
+    from ldm.modules.encoders.modules import FrozenCLIPEmbedder
+    from ldm.modules.embedding_manager import EmbeddingManager
+    from ldm.util import instantiate_from_config
+except ImportError:
+    spec = importlib.util.spec_from_file_location('module.name',
+        str(Path(__file__).resolve().parent.parent / 'ldm'))
+    ldm = importlib.util.module_from_spec(spec)
+    sys.modules['module.name'] = ldm
+    spec.loader.exec_module(ldm)
+
+    from ldm.modules.encoders.modules import FrozenCLIPEmbedder
+    from ldm.modules.embedding_manager import EmbeddingManager
+    from ldm.util import instantiate_from_config
+
 
 TAGS_RE = re.compile('<.*?>')
 sd_concepts_url_fn = lambda concept: f'https://huggingface.co/sd-concepts-library/{concept}/resolve/main/'

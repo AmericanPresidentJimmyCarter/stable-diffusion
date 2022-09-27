@@ -1,3 +1,4 @@
+import importlib.util
 import math
 import sys
 import torch
@@ -31,6 +32,19 @@ from .util import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Deal with "ldm" module collisions.
+try:
+    from ldm.modules.encoders.modules import FrozenCLIPEmbedder
+except ImportError:
+    spec = importlib.util.spec_from_file_location('module.name',
+        str(Path(__file__).resolve().parent.parent / 'ldm'))
+    ldm = importlib.util.module_from_spec(spec)
+    sys.modules['module.name'] = ldm
+    spec.loader.exec_module(ldm)
+
+    from ldm.modules.encoders.modules import FrozenCLIPEmbedder
+
 
 # Make transformers stop screaming.
 logging.set_verbosity_error()
