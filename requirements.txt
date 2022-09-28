@@ -6,4 +6,5 @@ kornia
 numpy
 omegaconf
 transformers
+requests
 k-diffusion @ git+https://github.com/crowsonkb/k-diffusion.git

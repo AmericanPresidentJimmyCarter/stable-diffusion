@@ -6,6 +6,6 @@ kornia
 numpy
 omegaconf
 transformers
+requests
 k-diffusion @ git+https://github.com/crowsonkb/k-diffusion.git
-CLIP @ git+https://github.com/openai/CLIP.git
 xformers @ git+https://github.com/facebookresearch/xformers@51dd119#egg=xformers
