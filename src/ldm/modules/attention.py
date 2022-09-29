@@ -404,11 +404,11 @@ class SpatialTransformer(nn.Module):
                 [BasicTransformerBlockMECA(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim)
                     for d in range(depth)]
             )
-
-        self.transformer_blocks = nn.ModuleList(
-            [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim)
-                for d in range(depth)]
-        )
+        else:
+            self.transformer_blocks = nn.ModuleList(
+                [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim)
+                    for d in range(depth)]
+            )
 
         self.proj_out = zero_module(nn.Conv2d(inner_dim,
                                               in_channels,
