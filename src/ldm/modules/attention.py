@@ -327,7 +327,8 @@ class MemoryEfficientCrossAttention(nn.Module):
         if self.attention_op is not None:
             return
 
-        _, K, M = x.shape
+        # _, K, M = x.shape
+        _, M, K = x.shape
         try:
             self.attention_op = AttentionOpDispatch(
                 dtype=x.dtype,
