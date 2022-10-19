@@ -16,6 +16,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from einops import rearrange, repeat
 from contextlib import contextmanager
 from functools import partial
+from omegaconf import ListConfig
 from tqdm import tqdm
 from torchvision.utils import make_grid
 from pytorch_lightning.utilities.distributed import rank_zero_only
@@ -611,6 +612,9 @@ class DDPM(pl.LightningModule):
 class LatentDiffusion(DDPM):
     """main class"""
     personalization_config = None
+    uses_rml_inpainting = False
+    CONCAT_KEYS = ("mask", "masked_image")
+    MASKED_IMAGE_KEY = "masked_image"
 
     def __init__(
         self,
@@ -643,6 +647,10 @@ class LatentDiffusion(DDPM):
         self.concat_mode = concat_mode
         self.cond_stage_trainable = cond_stage_trainable
         self.cond_stage_key = cond_stage_key
+
+        # Automatically detect RML inpainting mode from the configuration.
+        self.uses_rml_inpainting = conditioning_key == 'hybrid' and \
+            self.model.diff_model_config['params']['in_channels'] == 9
 
         try:
             self.num_downs = (
@@ -722,7 +730,10 @@ class LatentDiffusion(DDPM):
             ), 'rather not use custom rescaling and std-rescaling simultaneously'
             # set rescale weight to 1./std of encodings
             print('### USING STD-RESCALING ###')
-            x = super().get_input(batch, self.first_stage_key)
+            if self.uses_rml_inpainting is False:
+                x = super().get_input(batch, self.first_stage_key)
+            else: 
+                x = super().get_input_rml_inpainting(batch, self.first_stage_key)
             x = x.to(self.device)
             encoder_posterior = self.encode_first_stage(x)
             z = self.get_first_stage_encoding(encoder_posterior).detach()
@@ -1040,6 +1051,47 @@ class LatentDiffusion(DDPM):
         return out
 
     @torch.no_grad()
+    def get_input_rml_inpainting(
+        self, batch, bs=None, return_first_stage_outputs=False
+    ):
+        # note: restricted to non-trainable encoders currently
+        assert (
+            not self.cond_stage_trainable
+        ), "trainable cond stages not yet supported for inpainting"
+        z, c, x, xrec, xc = self.get_input(
+            batch,
+            self.first_stage_key,
+            return_first_stage_outputs=True,
+            force_c_encode=True,
+            return_original_cond=True,
+            bs=bs,
+        )
+
+        assert exists(self.CONCAT_KEYS)
+        c_cat = list()
+        for ck in self.CONCAT_KEYS:
+            cc = (
+                rearrange(batch[ck], "b h w c -> b c h w")
+                .to(memory_format=torch.contiguous_format)
+                .float()
+            )
+            if bs is not None:
+                cc = cc[:bs]
+                cc = cc.to(self.device)
+            bchw = z.shape
+            if ck != self.MASKED_IMAGE_KEY:
+                cc = torch.nn.functional.interpolate(cc, size=bchw[-2:])
+            else:
+                cc = self.get_first_stage_encoding(self.encode_first_stage(cc))
+            c_cat.append(cc)
+        c_cat = torch.cat(c_cat, dim=1)
+        all_conds = {"c_concat": [c_cat], "c_crossattn": [c]}
+        if return_first_stage_outputs:
+            return z, all_conds, x, xrec, xc
+        return z, all_conds
+
+
+    @torch.no_grad()
     def decode_first_stage(
         self, z, predict_cids=False, force_not_quantize=False
     ):
@@ -1208,6 +1260,24 @@ class LatentDiffusion(DDPM):
                 return self.first_stage_model.decode(z)
 
     @torch.no_grad()
+    def get_unconditional_conditioning(self, batch_size, null_label=None):
+        if null_label is not None:
+            xc = null_label
+            if isinstance(xc, ListConfig):
+                xc = list(xc)
+            if isinstance(xc, dict) or isinstance(xc, list):
+                c = self.get_learned_conditioning(xc)
+            else:
+                if hasattr(xc, "to"):
+                    xc = xc.to(self.device)
+                c = self.get_learned_conditioning(xc)
+        else:
+            # todo: get null label from cond_stage_model
+            raise NotImplementedError()
+        c = repeat(c, "1 ... -> b ...", b=batch_size).to(self.device)
+        return c
+
+    @torch.no_grad()
     def encode_first_stage(self, x):
         if hasattr(self, 'split_input_params'):
             if self.split_input_params['patch_distributed_vq']:
@@ -1256,7 +1326,13 @@ class LatentDiffusion(DDPM):
             return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
-        x, c = self.get_input(batch, self.first_stage_key)
+        x = None
+        c = None
+        if self.uses_rml_inpainting is False:
+            x, c = super().get_input(batch, self.first_stage_key)
+        else: 
+            x, c = super().get_input_rml_inpainting(batch, self.first_stage_key)
+
         loss = self(x, c)
         return loss
 
@@ -1911,7 +1987,10 @@ class LatentDiffusion(DDPM):
         use_ddim = ddim_steps is not None
 
         log = dict()
-        z, c, x, xrec, xc = self.get_input(
+        get_input_fn = self.get_input
+        if self.uses_rml_inpainting is True:
+            get_input_fn = self.get_input_rml_inpainting
+        z, c, x, xrec, xc = get_input_fn(
             batch,
             self.first_stage_key,
             return_first_stage_outputs=True,
@@ -2134,6 +2213,7 @@ class LatentDiffusion(DDPM):
 class DiffusionWrapper(pl.LightningModule):
     def __init__(self, diff_model_config, conditioning_key):
         super().__init__()
+        self.diff_model_config = diff_model_config
         self.diffusion_model = instantiate_from_config(diff_model_config)
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [

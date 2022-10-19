@@ -8,7 +8,7 @@ import urllib.request
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, Iterable, List
+from typing import Callable, Iterable, List, Tuple
 
 import PIL
 
@@ -148,7 +148,7 @@ def prompt_inject_custom_concepts(
     prompt: str,
     input_path: str,
     use_half: bool,
-):
+) -> Tuple[str, 'EmbeddingManager|None']:
     '''
     Inject custom concepts from the sd-concepts-library into a prompt.
     '''
@@ -265,6 +265,7 @@ def prompt_inject_custom_concepts(
         embedding_manager = merged_manager
 
         shutil.rmtree(os.path.join(input_path, 'embeddings_tmp'), ignore_errors=True)
+
     return prompt_injected, embedding_manager
 
 
@@ -313,7 +314,9 @@ def load_img(path: str=None, img: Image=None, convert_to_rgb=True):
     return 2.*image - 1., (w, h)
 
 
-def load_model_from_config(config, ckpt, use_half=False):
+def load_model_from_config(config, ckpt,
+    use_half=False,
+):
     pl_sd = torch.load(ckpt, map_location='cpu')
     sd = pl_sd['state_dict']
     model = instantiate_from_config(config.model)

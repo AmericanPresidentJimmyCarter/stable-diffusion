@@ -1,12 +1,18 @@
-import importlib.util
 import math
-import sys
 import torch
 
 from PIL import Image, ImageOps
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Tuple,
+)
 
 import k_diffusion as K
 import numpy as np
@@ -18,6 +24,9 @@ from omegaconf import OmegaConf
 from pytorch_lightning import seed_everything
 from torch import autocast
 from transformers import logging
+
+from ldm.models.diffusion.ddpm import LatentDiffusion
+from ldm.modules.embedding_manager import EmbeddingManager
 
 from .exceptions import StableDiffusionInferenceValueError
 from .util import (
@@ -36,6 +45,8 @@ from .util import (
 logging.set_verbosity_error()
 
 
+
+
 VALID_SAMPLERS = {'k_lms', 'dpm2', 'dpm2_ancestral', 'heun', 'euler',
     'euler_ancestral'}
 
@@ -50,8 +61,8 @@ def k_forward_multiconditionable(
     inner_model: Callable,
     x: torch.Tensor,
     sigma: torch.Tensor,
-    uncond: torch.Tensor,
-    cond: torch.Tensor,
+    uncond: 'Dict[str, Any]|torch.Tensor',
+    cond: 'Dict[str, Any]|torch.Tensor',
     cond_scale: float,
     cond_arities: Optional[Iterable[int]],
     cond_weights: Optional[Iterable[float]],
@@ -62,11 +73,49 @@ def k_forward_multiconditionable(
 
     https://github.com/Birch-san/stable-diffusion/blob/birch-mps-waifu/scripts/txt2img_fork.py
     '''
-    uncond_count = uncond.size(dim=0)
-    cond_count = cond.size(dim=0)
-    cond_in = torch.cat((uncond, cond)).to(x.device)
+    device = x.device
+    uncond_count = -1
+    if not isinstance(uncond, dict):
+        uncond_count = uncond.size(dim=0)
+    else:
+        uncond_count = uncond['c_crossattn'][0].size(dim=0)
+    if not isinstance(cond, dict):
+        cond_count = cond.size(dim=0)
+    else:
+        cond_count = cond['c_crossattn'][0].size(dim=0)
+    # cond_in = torch.cat((uncond, cond)).to(x.device)
+
+    cond_arities_tensor = torch.tensor(cond_arities, device=device)
+    if isinstance(cond, dict):
+        assert isinstance(uncond, dict)
+        cond_in = dict()
+        for k in cond:
+            if isinstance(cond[k], list) and k != 'c_concat':
+                cond_in[k] = [
+                    torch.cat([uncond[k][i], cond[k][i]]).to(device)
+                    for i in range(len(cond[k]))
+                ]
+            elif isinstance(cond[k], list) and k == 'c_concat':
+                # TODO This might be wrong if cond and uncond c_concat
+                # tensors are different, but with the RML inpainting model
+                # they are not.
+                #
+                # The first spread refers to when empty c_concat are used with
+                # hybrid conditioning, while the second spread is for properly
+                # generated image conditions.
+                spread = 1 + cond_count
+                if cond[k][0].size()[0] > 1:
+                    spread = 3 + (cond_count - 8) // 4
+                cond_in[k] = [
+                    torch.tile(cond[k][i], (spread, 1, 1, 1))
+                    for i in range(len(cond[k]))
+                ]
+            else:
+                cond_in[k] = torch.cat([uncond[k], cond[k]]).to(device)
+    else:
+        cond_in = torch.cat([uncond, cond]).to(device)
+
     del uncond, cond
-    cond_arities_tensor = torch.tensor(cond_arities, device=cond_in.device)
     if use_half and (x.dtype == torch.float32 or x.dtype == torch.float64):
         x = x.half()
     x_in = cat_self_with_repeat_interleaved(t=x,
@@ -90,7 +139,7 @@ def k_forward_multiconditionable(
     #   tensor([[[[0.5000]]],
     #           [[[0.1000]]]])
     weight_tensor = torch.tensor(list(cond_weights),
-        device=uncond_out.device, dtype=uncond_out.dtype) * cond_scale
+        device=device, dtype=uncond_out.dtype) * cond_scale
     weight_tensor = weight_tensor.reshape(len(list(cond_weights)), 1, 1, 1)
     deltas: torch.Tensor = (conds_out-unconds) * weight_tensor
     del conds_out, unconds, weight_tensor
@@ -131,8 +180,8 @@ class KCFGDenoiser(nn.Module):
         self,
         x: torch.Tensor,
         sigma: torch.Tensor,
-        uncond: torch.Tensor,
-        cond: torch.Tensor,
+        uncond: torch.Tensor|dict[str, Any],
+        cond: torch.Tensor|dict[str, Any],
         cond_scale: float,
         cond_arities: Optional[Iterable[int]]=None,
         cond_weights: Optional[Iterable[float]]=None,
@@ -194,7 +243,7 @@ class KCFGDenoiserMasked(nn.Module):
 
 class StableDiffusionInference:
     '''
-    Inference calss for stable diffusion.
+    Inference class for stable diffusion.
 
     config: OmegaConf containing the SD configuration, loaded from
       v1-inference.yaml.
@@ -217,7 +266,7 @@ class StableDiffusionInference:
     input_path = INPUT_PATH
     max_n_subprompts = None
     max_resolution = None
-    model = None
+    model: 'LatentDiffusion|None' = None
     model_k_wrapped = None
     model_k_config = None
     model_k_config_masked = None
@@ -248,11 +297,14 @@ class StableDiffusionInference:
         @use_half: Sample with FP16 instead of FP32.
         @width: Default width of image in pixels.
         '''
+        ORIGINAL_MODEL_PATH = f'{stable_path}/v1-inference.yaml'
+        INPAINTING_MODEL_PATH = f'{stable_path}/v1-inpainting.yaml'
+
         self.input_path = stable_path
         if config_loc is not None:
             self.opt.config = config_loc
         else:
-            self.opt.config = f'{stable_path}/v1-inference.yaml'
+            self.opt.config = ORIGINAL_MODEL_PATH
         if checkpoint_loc is not None:
             self.opt.ckpt = checkpoint_loc
         else:
@@ -268,8 +320,40 @@ class StableDiffusionInference:
         self.max_resolution = max_resolution
 
         self.config = OmegaConf.load(f"{self.opt.config}")
-        self.model = load_model_from_config(self.config, f"{self.opt.ckpt}",
-            use_half=use_half)
+
+        retry_original_config = False
+        retry_inpainting_config = False
+        try:
+            self.model = load_model_from_config(self.config, f"{self.opt.ckpt}",
+                use_half=use_half)
+        except RuntimeError as rte:
+            if 'Error(s) in loading state_dict for LatentDiffusion' in str(rte):
+                retry_original_config = ORIGINAL_MODEL_PATH != self.opt.config
+                if not retry_inpainting_config:
+                    retry_inpainting_config = True
+            else:
+                raise rte
+        if retry_original_config:
+            print('Supplied configuration has failed to load, retrying with ' +
+                f'local configuration file "{ORIGINAL_MODEL_PATH}"')
+            self.config = OmegaConf.load(ORIGINAL_MODEL_PATH)
+            try:
+                self.model = load_model_from_config(self.config, f"{self.opt.ckpt}",
+                    use_half=use_half)
+            except RuntimeError as rte:
+                if 'Error(s) in loading state_dict for LatentDiffusion' in str(rte):
+                    retry_inpainting_config = True
+                else:
+                    raise rte
+        if retry_inpainting_config:
+            print('Supplied configuration has failed to load, retrying with ' +
+                f'local inpainting configuration file "{INPAINTING_MODEL_PATH}"')
+            self.config = OmegaConf.load(INPAINTING_MODEL_PATH)
+            self.model = load_model_from_config(self.config, f"{self.opt.ckpt}",
+                use_half=use_half)
+
+        assert isinstance(self.model, LatentDiffusion)
+        print('Stable Diffusion has been initialized successfully')
         self.use_half = use_half
 
         self.device = torch.device("cuda") \
@@ -355,6 +439,142 @@ class StableDiffusionInference:
             embedding_manager,
         )
 
+    def create_rml_empty_mask_tensor(self,
+        latent: torch.Tensor,
+        width: int,
+        height: int,
+    ) -> torch.Tensor:
+        # Empty mask for the original image situated beneath the mask.
+        c_cat = torch.zeros(
+            latent.shape[0],
+            3,
+            height,
+            width,
+            device=latent.device,
+        )
+        c_cat = self.model.get_first_stage_encoding(
+            self.model.encode_first_stage(c_cat))
+
+        # First dimension is 1 padded --> full mask.
+        c_cat = torch.nn.functional.pad(
+            c_cat,
+            (0, 0, 0, 0, 1, 0),
+            value=1.0,
+        )
+
+        return c_cat
+
+    def make_rml_inpaint_batch(
+        self,
+        image: Image,
+        batch_size: int,
+    ) -> tuple[dict[str, Any], torch.Tensor, tuple[int, int]]:
+        '''
+        '''
+        image_tensor, (width, height) = load_img(img=image)
+        masked_tensor = None
+        if image.mode == 'RGB':
+            mask = torch.ones(1, 1, *image_tensor.shape[-2:])
+        else:
+            mask_image = image.split()[-1]
+            mask_image = ImageOps.invert(mask_image)
+
+            mask = np.array(mask_image)
+            mask = mask.astype(np.float32) / 255.0
+            mask = mask[None, None]
+            mask[mask < 0.5] = 0
+            mask[mask >= 0.5] = 1
+            mask = torch.from_numpy(mask)
+
+        masked_tensor = image_tensor * (mask < 0.5)
+
+        batch = {
+            'image': repeat(image_tensor.to(device=self.device),
+                '1 ... -> n ...', n=batch_size),
+            'txt': batch_size * [''],
+            'mask': repeat(mask.to(device=self.device),
+                '1 ... -> n ...', n=batch_size),
+            'masked_image': repeat(masked_tensor.to(device=self.device),
+                '1 ... -> n ...', n=batch_size),
+        }
+        return batch, image_tensor, (width, height)
+
+    def conditioning_step(
+        self,
+        prompt: str,
+        batch_size: int,
+        width: int,
+        height: int,
+        image: Image,
+        conditioning: 'torch.Tensor|Dict[str, Any]|None',
+        unconditioning: 'torch.Tensor|Dict[str, Any]',
+        weighted_subprompts: 'List[Tuple]|None',
+        model: LatentDiffusion,
+        embedding_manager: 'EmbeddingManager|None',
+    ) -> Tuple[
+        'torch.Tensor|Dict[str, Any]',
+        'torch.Tensor|Dict[str, Any]',
+        List[Tuple],
+    ]:
+        '''
+        '''
+        rml_hybrid_c_cat = None
+        rml_inpaint_batch = None
+
+        uncond_tensor = unconditioning
+        if isinstance(unconditioning, dict):
+            uncond_tensor = unconditioning['c_crossattn']
+        assert isinstance(uncond_tensor, torch.Tensor)
+        if conditioning is None:
+            conditioning, weighted_subprompts = split_weighted_subprompts_and_return_cond_latents(
+                prompt,
+                model.get_learned_conditioning,
+                embedding_manager,
+                uncond_tensor,
+                max_n_subprompts=self.max_n_subprompts,
+            )
+        assert isinstance(weighted_subprompts, list)
+
+        if model.uses_rml_inpainting is True and \
+            image is not None and \
+            isinstance(conditioning, torch.Tensor) and \
+            isinstance(unconditioning, torch.Tensor):
+            rml_inpaint_batch, init_image, (width, height) = self.make_rml_inpaint_batch(
+                image,
+                batch_size,
+            )
+
+            init_image = init_image.to(self.device)
+            init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
+
+            rml_hybrid_c_cat = list()
+            for concat_key in model.CONCAT_KEYS:
+                cc_chunk = rml_inpaint_batch[concat_key].float()
+                if concat_key != model.MASKED_IMAGE_KEY:
+                    bchw = [batch_size, 4, height // 8, width // 8]
+                    cc_chunk = torch.nn.functional.interpolate(cc_chunk,
+                        size=bchw[-2:])
+                else:
+                    cc_chunk = model.get_first_stage_encoding(
+                        model.encode_first_stage(cc_chunk))
+                rml_hybrid_c_cat.append(cc_chunk)
+            rml_hybrid_c_cat = torch.cat(rml_hybrid_c_cat, dim=1)
+
+            conditioning = {
+                'c_concat': [rml_hybrid_c_cat],
+                'c_crossattn': [conditioning],
+            }
+            unconditioning = {
+                'c_concat': [rml_hybrid_c_cat],
+                'c_crossattn': [unconditioning],
+            }
+
+        return (
+            conditioning,
+            unconditioning,
+            weighted_subprompts,
+        )
+
     @precision_cast_and_freeze_model
     def sample(
         self,
@@ -364,7 +584,7 @@ class StableDiffusionInference:
         seed: int,
         steps: int,
 
-        conditioning: torch.Tensor=None,
+        conditioning: 'Dict[str, Any]|torch.Tensor|None'=None,
         decode_first_stage: bool=True,
         height: int=None,
         init_latent: torch.Tensor=None,
@@ -377,7 +597,7 @@ class StableDiffusionInference:
         return_pil_images: bool=True,
         scale: float=7.5,
         strength: float=0.75,
-        unconditioning: torch.Tensor=None,
+        unconditioning: 'Dict[str, Any]|torch.Tensor|None'=None,
         weighted_subprompts: List[Tuple]=None,
         width: int=None,
     ) -> Tuple[torch.Tensor, Dict]:
@@ -460,6 +680,12 @@ class StableDiffusionInference:
         _height = self.opt.height if height is None else height
         _width = self.opt.width if width is None else width
 
+        model = self.model
+        assert isinstance(model, LatentDiffusion)
+        is_rml_inpainting = init_pil_image is not None and \
+            init_pil_image.mode == 'RGBA' and \
+            model.uses_rml_inpainting
+
         if isinstance(prompt, tuple) or isinstance(prompt, list):
             prompt = prompt[0]
 
@@ -469,25 +695,37 @@ class StableDiffusionInference:
                 self.input_path, self.use_half)
 
         if unconditioning is None:
-            unconditioning = self.model.get_learned_conditioning(
+            unconditioning = model.get_learned_conditioning(
                 batch_size * [''])
-        if conditioning is None:
-            conditioning, weighted_subprompts = split_weighted_subprompts_and_return_cond_latents(
-                prompt,
-                self.model.get_learned_conditioning,
-                embedding_manager,
-                unconditioning,
-                max_n_subprompts=self.max_n_subprompts,
-            )
+
+        # Get the conditioning and weighted subprompts, and maybe create the
+        # masked conditioning for the RML inpainting model.
+        (
+            conditioning,
+            unconditioning,
+            weighted_subprompts,
+        ) = self.conditioning_step(
+            prompt,
+            batch_size,
+            _width,
+            _height,
+            init_pil_image,
+            conditioning,
+            unconditioning,
+            weighted_subprompts,
+            model,
+            embedding_manager,
+        )
 
         mask_image = None
         mask_latent = None
         mask_tensor_from_image = None
         t_enc = None
+
         if init_latent is None and init_pil_image is not None:
-            # We have an alpha channel so we are inpainting, initialize all the
-            # components of masking.
-            if init_pil_image.mode == 'RGBA':
+            # We have an alpha channel so we are legacy inpainting, initialize
+            # all the components of masking.
+            if init_pil_image.mode == 'RGBA' and not model.uses_rml_inpainting:
                 mask_image = init_pil_image.split()[-1]
                 mask_image = ImageOps.invert(mask_image)
 
@@ -506,8 +744,8 @@ class StableDiffusionInference:
             init_image = init_image.to(self.device)
             init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
             if init_pil_image_as_random_latent is False:
-                init_latent = self.model.get_first_stage_encoding(
-                    self.model.encode_first_stage(init_image))
+                init_latent = model.get_first_stage_encoding(
+                    model.encode_first_stage(init_image))
             else:
                 init_latent = torch.zeros(
                     batch_size,
@@ -515,7 +753,8 @@ class StableDiffusionInference:
                     _height >> 3,
                     _width >> 3,
                 ).cuda()
-        if init_latent is not None:
+
+        if init_latent is not None and not is_rml_inpainting:
             assert 0. < strength < 1., 'can only work with strength in (0.0, 1.0)'
             t_enc = math.floor(strength * steps)
 
@@ -540,7 +779,7 @@ class StableDiffusionInference:
         sigmas = self.model_k_wrapped.get_sigmas(steps)
 
         x_noised = None
-        if init_latent is not None:
+        if init_latent is not None and not is_rml_inpainting:
             x_0 = init_latent
             noise = torch.randn_like(x_0) * sigmas[steps - t_enc - 1]
             x_noised = x_0 + noise
@@ -548,6 +787,25 @@ class StableDiffusionInference:
         else:
             x_noised = torch.randn([batch_size, *shape], device=self.device) * \
                 sigmas[0] # for GPU draw
+
+        # Assign an empty masking layer for the case that we are not doing
+        # inpainting but are using the RML inpainting model.
+        if isinstance(conditioning, torch.Tensor) and \
+            isinstance(unconditioning, torch.Tensor) and \
+            model.uses_rml_inpainting:
+            empty_hybrid_conditioning = self.create_rml_empty_mask_tensor(
+                x_noised,
+                _width,
+                _height,
+            )
+            conditioning = {
+                'c_concat': [empty_hybrid_conditioning],
+                'c_crossattn': [conditioning],
+            }
+            unconditioning = {
+                'c_concat': [empty_hybrid_conditioning],
+                'c_crossattn': [unconditioning],
+            }
 
         was_masked = all(val is not None for val in
             [mask_image, mask_latent, mask_tensor_from_image])
@@ -582,14 +840,15 @@ class StableDiffusionInference:
 
         x_samples = None
         if decode_first_stage is True or return_pil_images is True:
-            x_samples = self.model.decode_first_stage(samples)
+            x_samples = model.decode_first_stage(samples)
 
         images: List = []
         if return_pil_images is True and not was_masked:
             x_samples_clamped = torch.clamp(
                 (x_samples + 1.0) / 2.0,
                 min=0.0,
-                max=1.0)
+                max=1.0,
+            )
 
             for x_sample_c in x_samples_clamped:
                 x_sample_c = 255. * rearrange(x_sample_c.cpu().numpy(),
@@ -618,6 +877,10 @@ class StableDiffusionInference:
                 images.append(img)
 
         torch.cuda.empty_cache()
+        if isinstance(conditioning, dict):
+            conditioning['c_crossattn'] = conditioning['c_crossattn'][0].cpu()
+        if isinstance(unconditioning, dict):
+            unconditioning['c_crossattn'] = unconditioning['c_crossattn'][0].cpu()
         extra_data = {
             'cond_arities': extra_args['cond_arities'],
             'cond_weights': extra_args['cond_weights'],
