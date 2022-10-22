@@ -180,8 +180,8 @@ class KCFGDenoiser(nn.Module):
         self,
         x: torch.Tensor,
         sigma: torch.Tensor,
-        uncond: torch.Tensor|dict[str, Any],
-        cond: torch.Tensor|dict[str, Any],
+        uncond: 'torch.Tensor|Dict[str, Any]',
+        cond: 'torch.Tensor|Dict[str, Any]',
         cond_scale: float,
         cond_arities: Optional[Iterable[int]]=None,
         cond_weights: Optional[Iterable[float]]=None,
@@ -468,7 +468,7 @@ class StableDiffusionInference:
         self,
         image: Image,
         batch_size: int,
-    ) -> tuple[dict[str, Any], torch.Tensor, tuple[int, int]]:
+    ) -> 'Tuple[Dict[str, Any], torch.Tensor, Tuple[int, int]]':
         '''
         '''
         image_tensor, (width, height) = load_img(img=image)
@@ -600,7 +600,7 @@ class StableDiffusionInference:
         unconditioning: 'Dict[str, Any]|torch.Tensor|None'=None,
         weighted_subprompts: List[Tuple]=None,
         width: int=None,
-    ) -> Tuple[torch.Tensor, Dict]:
+    ) -> 'Tuple[torch.Tensor, Dict]':
         '''
         Create image(s) from text or (optionally) images.
 
