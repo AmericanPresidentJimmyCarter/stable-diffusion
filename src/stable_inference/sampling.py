@@ -595,6 +595,9 @@ class StableDiffusionInference:
         List[Tuple],
     ]:
         '''
+        Compute the conditionings from a prompt if needed. This handles the
+        injection of custom concept embeddings and different attention types
+        for conditioning such as hybrid attention.
         '''
         rml_hybrid_c_cat = None
         rml_inpaint_batch = None
