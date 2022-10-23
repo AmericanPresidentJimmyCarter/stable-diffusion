@@ -128,6 +128,40 @@ def generate_noise_pil_image(width: int, height: int) -> Image:
     return T.ToPILImage()(tensor)
 
 
+def load_img(path: str=None, img: Image=None, convert_to_rgb=True):
+    image = None
+    if img is None:
+        image = Image.open(path)
+    else:
+        image = img
+
+    if convert_to_rgb:
+        image = image.convert('RGB')
+
+    w, h = image.size
+    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+    image = image.resize((w, h), resample=PIL.Image.LANCZOS)
+    image = np.array(image).astype(np.float32) / 255.0
+    image = image[None].transpose(0, 3, 1, 2)
+    image = torch.from_numpy(image)
+    return 2.*image - 1., (w, h)
+
+
+def load_model_from_config(config, ckpt,
+    use_half=False,
+):
+    pl_sd = torch.load(ckpt, map_location='cpu')
+    sd = pl_sd['state_dict']
+    model = instantiate_from_config(config.model)
+    m, u = model.load_state_dict(sd, strict=False)
+
+    model.cuda()
+    model.eval()
+    if use_half:
+        model.half()
+    return model
+
+
 def preprocess_mask(mask: Image) -> torch.Tensor:
     '''
     Convert a masked image to a torch tensor.
@@ -293,40 +327,6 @@ def repeat_along_dim_0(t: torch.Tensor, factor: int) -> torch.Tensor:
         # prefer expand() whenever we can, since doesn't copy
         return t.expand(factor * t.size(dim=0), *(-1,)*(t.ndim-1))
     return t.repeat((factor, *(1,)*(t.ndim-1)))
-
-
-def load_img(path: str=None, img: Image=None, convert_to_rgb=True):
-    image = None
-    if img is None:
-        image = Image.open(path)
-    else:
-        image = img
-
-    if convert_to_rgb:
-        image = image.convert('RGB')
-
-    w, h = image.size
-    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
-    image = image.resize((w, h), resample=PIL.Image.LANCZOS)
-    image = np.array(image).astype(np.float32) / 255.0
-    image = image[None].transpose(0, 3, 1, 2)
-    image = torch.from_numpy(image)
-    return 2.*image - 1., (w, h)
-
-
-def load_model_from_config(config, ckpt,
-    use_half=False,
-):
-    pl_sd = torch.load(ckpt, map_location='cpu')
-    sd = pl_sd['state_dict']
-    model = instantiate_from_config(config.model)
-    m, u = model.load_state_dict(sd, strict=False)
-
-    model.cuda()
-    model.eval()
-    if use_half:
-        model.half()
-    return model
 
 
 def repeat_interleave_along_dim_0(

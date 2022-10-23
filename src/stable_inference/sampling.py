@@ -51,11 +51,54 @@ VALID_SAMPLERS = {'k_lms', 'dpm2', 'dpm2_ancestral', 'heun', 'euler',
     'euler_ancestral'}
 
 
+DYNAMIC_THRESHOLDING_CEILING = 42.
+DYNAMIC_THRESHOLDING_FLOOR = 3.0560
+DYNAMIC_THRESHOLDING_MIMIC_SCALE = 7.5
+DYNAMIC_THRESHOLDING_PERCENTILE = 0.9995
 INPUT_PATH = str(Path(__file__).parent.absolute())
 MAX_STEPS = 250
 MIN_HEIGHT = 384
 MIN_WIDTH = 384
 
+
+def dynamic_thresholding_of_image_latent(
+    latent_images: torch.Tensor,
+    latent_images_target_scaling: torch.Tensor,
+    scale_factor: float,
+) -> torch.Tensor:
+    '''
+    One of birch-san's methods for dynamic thresholding.
+    '''
+    dt_unscaled: torch.Tensor = latent_images_target_scaling / scale_factor
+    dt_flattened: torch.Tensor = dt_unscaled.flatten(2)
+    dt_means: torch.Tensor = dt_flattened.mean(dim=2).unsqueeze(2)
+    dt_recentered: torch.Tensor = dt_flattened - dt_means
+    dt_q = torch.quantile(
+        dt_recentered.abs(),
+        DYNAMIC_THRESHOLDING_PERCENTILE,
+        dim=2,
+    )
+
+    ut_unscaled:  torch.Tensor = latent_images / scale_factor
+    ut_flattened:  torch.Tensor = ut_unscaled.flatten(2)
+    ut_means:  torch.Tensor = ut_flattened.mean(dim=2).unsqueeze(2)
+    ut_centered:  torch.Tensor = ut_flattened - ut_means
+
+    ut_abs = ut_centered.abs()
+    ut_q = torch.quantile(ut_abs, DYNAMIC_THRESHOLDING_PERCENTILE, dim=2)
+    ut_q = torch.maximum(ut_q, dt_q)
+    q_ratio = ut_q / dt_q
+    q_ratio = q_ratio.unsqueeze(2).expand(*ut_centered.shape)
+    t_scaled = ut_centered / q_ratio
+
+    uncentered: torch.Tensor = t_scaled + ut_means
+    unflattened: torch.Tensor = uncentered.unflatten(
+        2,
+        latent_images_target_scaling.shape[2:],
+    )
+    scaled = unflattened * scale_factor
+
+    return scaled
 
 def k_forward_multiconditionable(
     inner_model: Callable,
@@ -66,6 +109,8 @@ def k_forward_multiconditionable(
     cond_scale: float,
     cond_arities: Optional[Iterable[int]],
     cond_weights: Optional[Iterable[float]],
+    scale_factor: float=1.,
+    use_dynamic_thresholding: bool=False,
     use_half: bool=False,
 ) -> torch.Tensor:
     '''
@@ -141,11 +186,34 @@ def k_forward_multiconditionable(
     weight_tensor = torch.tensor(list(cond_weights),
         device=device, dtype=uncond_out.dtype) * cond_scale
     weight_tensor = weight_tensor.reshape(len(list(cond_weights)), 1, 1, 1)
-    deltas: torch.Tensor = (conds_out-unconds) * weight_tensor
+    deltas: torch.Tensor = (conds_out - unconds)
+
+    if use_dynamic_thresholding:
+        deltas_target = deltas * weight_tensor
+        weight_tensor_mimic = torch.tensor(list(map(
+                lambda weight: weight / max(cond_weights),
+                cond_weights,
+            )),
+            device=device, dtype=uncond_out.dtype) * \
+                DYNAMIC_THRESHOLDING_MIMIC_SCALE
+        weight_tensor_mimic = weight_tensor_mimic.reshape(
+            len(list(cond_weights)), 1, 1, 1)
+        deltas_mimic = deltas * weight_tensor_mimic
+        deltas = dynamic_thresholding_of_image_latent(
+            deltas_target,
+            deltas_mimic,
+            scale_factor,
+        )
+    else:
+        deltas = deltas * weight_tensor
+
     del conds_out, unconds, weight_tensor
     cond = sum_along_slices_of_dim_0(deltas, arities=cond_arities)
     del deltas
-    return uncond_out + cond
+
+    latent_samples = uncond_out + cond
+
+    return latent_samples
 
 
 class StableDiffusionConfig:
@@ -172,9 +240,10 @@ class KCFGDenoiser(nn.Module):
     '''
     k-diffusion sampling with multi-conditionable denoising.
     '''
-    def __init__(self, model):
+    def __init__(self, model, scale_factor: float):
         super().__init__()
         self.inner_model = model
+        self.scale_factor = scale_factor
 
     def forward(
         self,
@@ -185,6 +254,7 @@ class KCFGDenoiser(nn.Module):
         cond_scale: float,
         cond_arities: Optional[Iterable[int]]=None,
         cond_weights: Optional[Iterable[float]]=None,
+        use_dynamic_thresholding: bool=True,
         use_half: bool=False,
     ) -> torch.Tensor:
         return k_forward_multiconditionable(
@@ -196,6 +266,8 @@ class KCFGDenoiser(nn.Module):
             cond_scale,
             cond_arities=cond_arities,
             cond_weights=cond_weights,
+            scale_factor=self.scale_factor,
+            use_dynamic_thresholding=use_dynamic_thresholding,
             use_half=use_half,
         )
 
@@ -204,9 +276,10 @@ class KCFGDenoiserMasked(nn.Module):
     '''
     k-diffusion sampling with multi-conditionable denoising and masking.
     '''
-    def __init__(self, model):
+    def __init__(self, model, scale_factor: float):
         super().__init__()
         self.inner_model = model
+        self.scale_factor = scale_factor
 
     def forward(self,
         x: torch.Tensor,
@@ -216,6 +289,7 @@ class KCFGDenoiserMasked(nn.Module):
         cond_scale: float,
         cond_arities: Optional[Iterable[int]]=None,
         cond_weights: Optional[Iterable[float]]=None,
+        use_dynamic_thresholding: bool=True,
         use_half: bool=False,
         mask: Optional[torch.Tensor]=None,
         x_frozen: Optional[torch.Tensor]=None,
@@ -229,6 +303,8 @@ class KCFGDenoiserMasked(nn.Module):
             cond_scale,
             cond_arities=cond_arities,
             cond_weights=cond_weights,
+            scale_factor=self.scale_factor,
+            use_dynamic_thresholding=use_dynamic_thresholding,
             use_half=use_half,
         )
 
@@ -362,8 +438,10 @@ class StableDiffusionInference:
         self.model = self.model.to(self.device)
 
         self.model_k_wrapped = K.external.CompVisDenoiser(self.model)
-        self.model_k_config = KCFGDenoiser(self.model_k_wrapped)
-        self.model_k_config_masked = KCFGDenoiserMasked(self.model_k_wrapped)
+        self.model_k_config = KCFGDenoiser(self.model_k_wrapped,
+            scale_factor=self.model.scale_factor)
+        self.model_k_config_masked = KCFGDenoiserMasked(self.model_k_wrapped,
+            scale_factor=self.model.scale_factor)
 
     def _height_and_width_check(self, height, width):
         if height * width > self.max_resolution:
@@ -598,6 +676,7 @@ class StableDiffusionInference:
         scale: float=7.5,
         strength: float=0.75,
         unconditioning: 'Dict[str, Any]|torch.Tensor|None'=None,
+        use_dynamic_thresholding: bool=False,
         weighted_subprompts: List[Tuple]=None,
         width: int=None,
     ) -> 'Tuple[torch.Tensor, Dict]':
@@ -651,6 +730,9 @@ class StableDiffusionInference:
           Also is used to condition the amount of noise added to the starting
           latent image.
         @unconditioning: Tensor for unconditioning (unconditioned embeddings).
+        @use_dynamic_thresholding: bool for whether or not to use dynamic
+          thresholding during the forward step, to reduce the amount of
+          saturation and artifacts at high scale values.
         @weighted_subprompts: List of tuples in the form (foo, 1.) where "foo"
           is the subprompt and "1." is the float for the weight of that
           subprompt.
@@ -815,6 +897,7 @@ class StableDiffusionInference:
             'cond_scale': scale,
             'cond_arities': [len(weighted_subprompts),] * batch_size,
             'cond_weights': [pr[1] for pr in weighted_subprompts] * batch_size,
+            'use_dynamic_thresholding': use_dynamic_thresholding,
             'use_half': self.use_half,
         }
         if was_masked:
