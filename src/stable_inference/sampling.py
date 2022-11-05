@@ -45,10 +45,9 @@ from .util import (
 logging.set_verbosity_error()
 
 
-
-
 VALID_SAMPLERS = {'k_lms', 'dpm2', 'dpm2_ancestral', 'heun', 'euler',
-    'euler_ancestral'}
+    'euler_ancestral', 'dpm_fast', 'dpm_adaptive', 'dpmpp_2s_ancestral',
+    'dpmpp_2m'}
 
 
 DYNAMIC_THRESHOLDING_CEILING = 42.
@@ -860,6 +859,14 @@ class StableDiffusionInference:
             sampling_fn = K.sampling.sample_euler
         if sampler == 'euler_ancestral':
             sampling_fn = K.sampling.sample_euler_ancestral
+        if sampler == 'dpm_fast':
+            sampling_fn = K.sampling.sample_dpm_fast
+        if sampler == 'dpm_adaptive':
+            sampling_fn = K.sampling.sample_dpm_adaptive
+        if sampler == 'dpmpp_2s_ancestral':
+            sampling_fn = K.sampling.sample_dpmpp_2s_ancestral
+        if sampler == 'dpmpp_2m':
+            sampling_fn = K.sampling.sample_dpmpp_2m
 
         sigmas = self.model_k_wrapped.get_sigmas(steps)
 
