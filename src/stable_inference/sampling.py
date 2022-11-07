@@ -45,6 +45,33 @@ from .util import (
 logging.set_verbosity_error()
 
 
+SIGMA_MIN_DEFAULT = 0.0292
+SIGMA_MAX_DEFAULT = 14.6146
+SIGMA_ARGS_KERRAS_DEFAULT = lambda steps: (
+    [steps, SIGMA_MIN_DEFAULT, SIGMA_MAX_DEFAULT], # n, sigma_min, sigma_max
+    {
+        'rho': 7.,
+        'device': 'cuda',
+    }
+)
+SIGMA_ARGS_EXPONENTIAL_DEFAULT = lambda steps: (
+    [steps, SIGMA_MIN_DEFAULT, SIGMA_MAX_DEFAULT], # n, sigma_min, sigma_max
+    {
+        'device': 'cuda',
+    }
+)
+SIGMA_ARGS_VP_DEFAULT = lambda steps: (
+    [steps], # n
+    {
+        'beta_d': 19.9,
+        'beta_min': 0.1,
+        'eps_s': 1e-3,
+        'device': 'cuda',
+    }
+)
+
+
+VALID_NOISE_FUNCTIONS = { None, 'karras', 'exponential', 'vp'}
 VALID_SAMPLERS = {'k_lms', 'dpm2', 'dpm2_ancestral', 'heun', 'euler',
     'euler_ancestral', 'dpm_fast', 'dpm_adaptive', 'dpmpp_2s_ancestral',
     'dpmpp_2m'}
@@ -673,6 +700,8 @@ class StableDiffusionInference:
         k_sampler_callback: Callable=None,
         k_sampler_config: nn.Module=None,
         k_sampler_extra_args: Dict=None,
+        noiser: str='default',
+        noise_options: tuple[list[Any], Dict[str, Any]]=None,
         prompt_concept_injection_required: bool=True,
         return_pil_images: bool=True,
         scale: float=7.5,
@@ -720,6 +749,12 @@ class StableDiffusionInference:
         @k_sampler_extra_args: Extra arguments to inject into the k_diffusion
           sampler's extra args. These are merged such that these arguments
           will take precedence.
+        @noiser: The type of noising function used to generate sigmas, either
+          'karras', 'exponential', or 'vp'.
+        @noise_options: tuple of a list and dict that refer to the args and
+          kwargs to give to the function specified by noiser. The first value
+          of the 0th item (list) will always be rewritten with the actual number
+          of steps, so can be anything.
         @prompt_concept_injection_required: Whether or not prompt has already
           been processed by prompt_inject_custom_concepts, which handles pushing
           new sd-diffusers concepts into the EmbeddingManager. Ignored if
@@ -750,7 +785,6 @@ class StableDiffusionInference:
                   subprompt conditioning)
                 'conditioning': conditioning embeddings
                 'images': optional; a list of PIL images generated
-                'samples': samples, # Latent space representations, undecoded
                 'unconditioning': unconditioning embeddings
                 'x_noised': the input tensor for diffusion, latent space
                   representation
@@ -860,15 +894,53 @@ class StableDiffusionInference:
         if sampler == 'euler_ancestral':
             sampling_fn = K.sampling.sample_euler_ancestral
         if sampler == 'dpm_fast':
-            sampling_fn = K.sampling.sample_dpm_fast
+            sampling_fn = lambda *args, **kwargs: K.sampling.sample_dpm_fast(
+                args[0],
+                args[1],
+                SIGMA_MIN_DEFAULT,
+                SIGMA_MAX_DEFAULT,
+                steps,
+                **kwargs,
+            )
         if sampler == 'dpm_adaptive':
-            sampling_fn = K.sampling.sample_dpm_adaptive
+            sampling_fn = lambda *args, **kwargs: K.sampling.sample_dpm_adaptive(
+                args[0],
+                args[1],
+                SIGMA_MIN_DEFAULT,
+                SIGMA_MAX_DEFAULT,
+                **kwargs,
+            )
         if sampler == 'dpmpp_2s_ancestral':
             sampling_fn = K.sampling.sample_dpmpp_2s_ancestral
         if sampler == 'dpmpp_2m':
             sampling_fn = K.sampling.sample_dpmpp_2m
 
+        if noise_options is not None and \
+            isinstance(noise_options, tuple) and \
+            len(noise_options) == 2:
+            noise_options[0][0] = steps
         sigmas = self.model_k_wrapped.get_sigmas(steps)
+        if noiser == 'karras':
+            if noise_options is None:
+                noise_options = SIGMA_ARGS_KERRAS_DEFAULT(steps)
+            sigmas = K.sampling.get_sigmas_karras(
+                *noise_options[0],
+                **noise_options[1],
+            )
+        if noiser == 'exponential':
+            if noise_options is None:
+                noise_options = SIGMA_ARGS_EXPONENTIAL_DEFAULT(steps)
+            sigmas = K.sampling.get_sigmas_exponential(
+                *noise_options[0],
+                **noise_options[1],
+            )
+        if noiser == 'vp':
+            if noise_options is None:
+                noise_options = SIGMA_ARGS_VP_DEFAULT(steps)
+            sigmas = K.sampling.get_sigmas_vp(
+                *noise_options[0],
+                **noise_options[1],
+            )
 
         x_noised = None
         if init_latent is not None and not is_rml_inpainting:
