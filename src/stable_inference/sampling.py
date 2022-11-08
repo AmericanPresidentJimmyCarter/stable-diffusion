@@ -701,7 +701,7 @@ class StableDiffusionInference:
         k_sampler_config: nn.Module=None,
         k_sampler_extra_args: Dict=None,
         noiser: str='default',
-        noise_options: tuple[list[Any], Dict[str, Any]]=None,
+        noise_options: Tuple[List[Any], Dict[str, Any]]=None,
         prompt_concept_injection_required: bool=True,
         return_pil_images: bool=True,
         scale: float=7.5,
