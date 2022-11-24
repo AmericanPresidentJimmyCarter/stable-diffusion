@@ -8,3 +8,4 @@ omegaconf
 transformers
 requests
 k-diffusion @ git+https://github.com/crowsonkb/k-diffusion.git
+open-clip-torch==2.7.0

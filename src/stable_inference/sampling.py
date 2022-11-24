@@ -399,8 +399,8 @@ class StableDiffusionInference:
         @use_half: Sample with FP16 instead of FP32.
         @width: Default width of image in pixels.
         '''
-        ORIGINAL_MODEL_PATH = f'{stable_path}/v1-inference.yaml'
-        INPAINTING_MODEL_PATH = f'{stable_path}/v1-inpainting.yaml'
+        ORIGINAL_MODEL_PATH = f'{stable_path}/v2-inference.yaml'
+        INPAINTING_MODEL_PATH = f'{stable_path}/v2-inpainting.yaml'
 
         self.input_path = stable_path
         if config_loc is not None:
@@ -412,7 +412,7 @@ class StableDiffusionInference:
         else:
             # Maybe they are here?
             stable_repo_path = str(Path(__file__).resolve().parent.parent)
-            self.opt.ckpt = f'{stable_repo_path}/models/ldm/stable-diffusion-v1/model.ckpt'
+            self.opt.ckpt = f'{stable_repo_path}/models/ldm/stable-diffusion-v2/model.ckpt'
 
         self.opt.height = height
         self.opt.width = width
