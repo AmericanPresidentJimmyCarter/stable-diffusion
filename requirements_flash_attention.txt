@@ -9,3 +9,4 @@ transformers
 requests
 k-diffusion @ git+https://github.com/crowsonkb/k-diffusion.git
 xformers @ git+https://github.com/facebookresearch/xformers@51dd119#egg=xformers
+open-clip-torch==2.7.0
