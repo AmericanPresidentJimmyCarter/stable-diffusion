@@ -50,3 +50,5 @@ coverage.xml
 docs/_build/
 
 .mypy_cache
+
+src/stable_inference/sd_embeddings_store

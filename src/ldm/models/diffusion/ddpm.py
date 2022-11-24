@@ -1562,13 +1562,11 @@ class LatentDiffusion(DDPM):
                     ].to(self.device)
                     for bbox in patch_limits
                 ]  # list of length l with tensors of shape (1, 2)
-                print(patch_limits_tknzd[0].shape)
                 # cut tknzd crop position from conditioning
                 assert isinstance(
                     cond, dict
                 ), 'cond must be dict to be fed into model'
                 cut_cond = cond['c_crossattn'][0][..., :-2].to(self.device)
-                print(cut_cond.shape)
 
                 adapted_cond = torch.stack(
                     [
@@ -1577,13 +1575,10 @@ class LatentDiffusion(DDPM):
                     ]
                 )
                 adapted_cond = rearrange(adapted_cond, 'l b n -> (l b) n')
-                print(adapted_cond.shape)
                 adapted_cond = self.get_learned_conditioning(adapted_cond)
-                print(adapted_cond.shape)
                 adapted_cond = rearrange(
                     adapted_cond, '(l b) n d -> l b n d', l=z.shape[-1]
                 )
-                print(adapted_cond.shape)
 
                 cond_list = [{'c_crossattn': [e]} for e in adapted_cond]
 

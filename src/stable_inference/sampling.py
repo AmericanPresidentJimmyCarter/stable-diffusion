@@ -283,8 +283,6 @@ class KCFGDenoiser(nn.Module):
         use_dynamic_thresholding: bool=True,
         use_half: bool=False,
     ) -> torch.Tensor:
-        print(x.size())
-        print(sigma.size())
         return k_forward_multiconditionable(
             self.inner_model,
             x,
@@ -343,37 +341,6 @@ class KCFGDenoiserMasked(nn.Module):
             denoised = (img_orig * mask) + (denoised * mask_inv)
 
         return denoised
-
-
-class DiscreteVDDPMDenoiser(K.external.DiscreteSchedule):
-    """A wrapper for discrete schedule DDPM models that output v."""
-
-    def __init__(self, model, ddpm_model):
-        alphas_cumprod = ddpm_model.alphas_cumprod
-        quantize = False
-        super().__init__(((1 - alphas_cumprod) / alphas_cumprod) ** 0.5, quantize)
-        self.inner_model = model
-        self.sigma_data = 1.
-
-    def get_scalings(self, sigma):
-        c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
-        c_out = -sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
-        c_in = 1 / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
-        return c_skip, c_out, c_in
-
-    def get_v(self, *args, **kwargs):
-        return self.inner_model(*args, **kwargs)
-
-    def loss(self, inp, noise, sigma, **kwargs):
-        c_skip, c_out, c_in = [K.utils.append_dims(x, inp.ndim) for x in self.get_scalings(sigma)]
-        noised_input = inp + noise * K.utils.append_dims(sigma, inp.ndim)
-        model_output = self.get_v(noised_input * c_in, self.sigma_to_t(sigma), **kwargs)
-        target = (inp - c_skip * noised_input) / c_out
-        return (model_output - target).pow(2).flatten(1).mean(1)
-
-    def forward(self, inp, sigma, **kwargs):
-        c_skip, c_out, c_in = [K.utils.append_dims(x, inp.ndim) for x in self.get_scalings(sigma)]
-        return self.get_v(inp * c_in, self.sigma_to_t(sigma), **kwargs) * c_out + inp * c_skip
 
 
 class StableDiffusionInference:
@@ -502,7 +469,6 @@ class StableDiffusionInference:
                 self.model)
             self.model_k_config_masked = KCFGDenoiserMasked(self.model_k_wrapped,
                 scale_factor=self.model.scale_factor)
-
         else:
             self.model_k_wrapped = K.external.CompVisDenoiser(self.model)
             self.model_k_config = KCFGDenoiser(self.model_k_wrapped,
