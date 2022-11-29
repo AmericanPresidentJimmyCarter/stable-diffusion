@@ -3,7 +3,6 @@ tqdm
 pytorch_lightning
 einops
 kornia
-numpy
 omegaconf
 transformers
 requests
